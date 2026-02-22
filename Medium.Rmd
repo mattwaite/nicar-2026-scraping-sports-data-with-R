@@ -1,0 +1,93 @@
+# Now, the slightly harder way
+
+First, we need libraries
+
+```{r}
+library(tidyverse)
+library(rvest)
+library(janitor)
+```
+
+Frequently, you will run into sports data providers who believe humans look at their tables of data. And they will make design decisions based on human eyes and reasoning abilities. So annoying. One of the best sports data sites on the planet -- and one of the worst offenders of this Humans Look At Tables sin -- is Sports Reference. Their sin? Two row header rows. Which results in header names repeating. Which is bad. 
+
+It's March. Which means the sports world is fixated on college basketball. So let's scrape some. Our target is the [school stats page on Sport Reference's Men's College Basketball page](https://www.sports-reference.com/cbb/seasons/men/2026-school-stats.html) (there is an identical version for the women's game [if you like](https://www.sports-reference.com/cbb/seasons/women/2026-school-stats.html)). 
+
+Go to that page, scroll down to the data and you'll see the issue: Two row header rows, names that repeat. 
+
+Let's fetch this page and store it so we're not repeatedly requesting it. 
+
+```{r}
+mbb <- "https://www.sports-reference.com/cbb/seasons/men/2026-school-stats.html"
+
+results <- mbb |> read_html()
+```
+
+Similar to the easy method, get the xpath for the table. The nice thing about Sports Reference: They use ids for their tables, which makes the xpath super simple. 
+
+```{r}
+results |> 
+  html_element(xpath = '//*[@id="basic_school_stats"]') |> 
+  html_table()
+```
+
+Annnnd oof we have a car crash at the top. First things first, we need to tell rvest to ignore the table headers. Then, we can bring some janitor functions to bear on this. Janitor will let us use a row of data to create headers. When we ignore the table headers, that row that has all of our column names in it will become row 2. Then, because Sports Reference is so human centered, we'll use janitor's `clean_names()` function to ... clean up those names. 
+
+```{r}
+results |> 
+  html_element(xpath = '//*[@id="basic_school_stats"]') |> 
+  html_table(header = FALSE) |> 
+  row_to_names(row_number = 2) |> 
+  clean_names()
+```
+
+Next: If we look at our data, we have three more problems. 
+
+1. There are a bunch of empty columns there for aesthetic purposes and are a waste for us. Jantior can remove those automatically. 
+2. If you scroll down, you'll see our header rows repeat, which is bad, but we can remove them with a filter. 
+3. All of our numeric data are characters. Why? Because of #2. We will need to fix that.
+
+Let's do these one at a time. 
+
+We can remove empty rows and columns with the `remove_empty` function in janitor. 
+
+```{r}
+results |> 
+  html_element(xpath = '//*[@id="basic_school_stats"]') |> 
+  html_table(header = FALSE) |> 
+  row_to_names(row_number = 2) |> 
+  clean_names() |> 
+  remove_empty(which = c("rows", "cols"))
+```
+
+I always use rows and cols, because janitor is conservative here -- if there is literally *anything* in a column or row, it keeps it. So you're losing nothing by running both. What happens? We lose no rows, but 5 columns of just blank data. 
+
+Now we need to filter out extraneous column headers. If you scroll down to row 21, you'll find our repeating header problem. We can use the `g` column to fix this with some `!=` filters. 
+
+```{r}
+results |> 
+  html_element(xpath = '//*[@id="basic_school_stats"]') |> 
+  html_table(header = FALSE) |> 
+  row_to_names(row_number = 2) |> 
+  clean_names() |> 
+  remove_empty(which = c("rows", "cols")) |> 
+  filter(
+    g != "Overall" & g != "G"
+  )
+```
+The `&` operator here comes in handy because we want all rows that *AREN'T* "Overall" *AND* "G".
+
+Now, we just have the number problem. We could use mutate and do each one that we need, but that's a lot of code and a lot of knowing beforehand what we want. There's an easier way: `mutate_at`. And since only column 2 is a character field, we can use the `-` operator to say mutate NOT column 2 into a numeric column. 
+
+```{r}
+results |> 
+  html_element(xpath = '//*[@id="basic_school_stats"]') |> 
+  html_table(header = FALSE) |> 
+  row_to_names(row_number = 2) |> 
+  clean_names() |> 
+  remove_empty(which = c("rows", "cols")) |> 
+  filter(
+    g != "Overall" & g != "G"
+  ) |> 
+  mutate_at(-2, as.numeric)
+```
+March Madness charts await you, but *please, please, please* make sure you credit Sports Reference for your data. 

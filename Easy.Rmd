@@ -1,9 +1,4 @@
----
-title: "Scraping Sports Data When It's Easy"
-output:
-  html_document:
-    df_print: paged
----
+# First, the easy way
 
 First, we need libraries
 
@@ -26,7 +21,7 @@ Next, Rvest works in four steps when it's a table.
 
 1.  Start with your URL
 2.  Run the whole request/response cycle with `read_html()`
-3.  Find your table html with `html_node` and the xpath to it.
+3.  Find your table html with `html_element` and the xpath to it.
 4.  Convert that to a dataframe
 
 Let's start with the first two:
@@ -66,7 +61,7 @@ Now that you have the Xpath copied, you're ready for the next step -- traversing
 
 ```{r}
 results |> 
-  html_node(xpath = '/html/body/div/div[3]/div[2]/table')
+  html_element(xpath = '/html/body/div/div[3]/div[2]/table')
 ```
 Note: Different HTML engines in browsers come up with different answers for the Xcode. Yours might look slightly different than mine and still work. Firefox and Chrome do this a lot. 
 
@@ -76,7 +71,7 @@ Now finally: Turn this all into a table.
 
 ```{r}
 results |> 
-  html_node(xpath = '/html/body/div/div[3]/div[2]/table') |> 
+  html_element(xpath = '/html/body/div/div[3]/div[2]/table') |> 
   html_table()
 ```
 
@@ -97,7 +92,7 @@ How do we fix this? Because it's just one column, let's use the rename function 
 
 ```{r}
 results |> 
-  html_node(xpath = '/html/body/div/div[3]/div[2]/table') |> 
+  html_element(xpath = '/html/body/div/div[3]/div[2]/table') |> 
   html_table() |> 
   rename(
     Rank = 1

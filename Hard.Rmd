@@ -1,0 +1,207 @@
+# Now the hard way, AKA the NCAA. 
+
+For having such a huge footprint on the American sports scene, the NCAA is *terrible* at being a data provider for the general public. Maybe they have some secret system for accredited members, but for me, a guy who teaches a sports data class every semester, getting 30+ students accredited every semester seems insane. Why doesn't the NCAA have a Sports Reference style site? 
+
+They do! It's terrible. It's slow, brittle, poorly made and not easy to scrape. 
+
+I give you [stats.ncaa.org](https://stats.ncaa.org/)
+
+If you have some determination and pay very close attention to url patterns, it can be done, but be *very* careful. The NCAA can, does and will ban IP addresses of people being abusive, so one of our immediate concerns is going to be putting delays on each request -- 3-5 seconds minimum. 
+
+Nebraska, my employer, is a volleyball school. We have one of the most high profile programs in the country, the players are local celebrities, and more people attend a single Nebraska volleyball players than many women's volleyball programs get in a day. We even set a world record for the single most attended women's sporting event ever when we had a volleyball match in our football stadium and 92,000 people showed up. So let's look over my volleyball scraper. Why look it over? It's unlikely this will work on a NICAR conference hotel network, but the pattern will work for many NCAA sports. 
+
+What follows is a mix of my own trial and error over the years and some AI assistance to add some features like progress tracking and simplifying loops to be more tidy and less "I did this in Python years ago and this makes sense to me and no one else". 
+
+First, we need libraries. 
+
+```{r}
+library(tidyverse)
+library(rvest)
+library(progress)
+library(janitor)
+```
+
+Next, we're going to set some things up. Because I have been scraping this data for years, I need to adjust to get the next season. I don't want to be going through my code to change 2024 to 2025 a million times, so I create variables like the season and the file names with the season in them first, so every time I update, I only have to update this block. 
+
+```{r}
+season = 2025
+
+playerfilename <- paste0("ncaa_womens_volleyball_players_", season, ".csv")
+teamfilename <- paste0("ncaa_womens_volleyball_teams_", season, ".csv")
+
+root_url <- "https://stats.ncaa.org"
+
+rankingurl <- "https://stats.ncaa.org/selection_rankings/nitty_gritties/45914"
+```
+
+Note the `rankingurl`. That is a URL the NCAA creates, you'll have to find it under their rankings menu item and it's one of the few permanent urls on the site. The others are the individual teams. And that's how we're going to attack this. We're going to scrape this rankings page, extract the urls to each team, then get each team's player and team stats from a single table and store those in two separate dataframes. 
+
+Problem? We have to do that 350+ times. Each time we want it. With agressive pauses in it. It takes a while.
+
+This next chunk will get that rankings page, extract the URL for each team and extract a table of team and conference names that will come in very handy later. 
+
+```{r}
+ranking_page <- rankingurl |> 
+  read_html() 
+
+teamurls <- ranking_page |>
+  html_element(xpath='//*[@id="selection_rankings_nitty_gritty_data_table"]//tr/td[1]/a') |>
+  html_attr("href")
+
+team_table <- ranking_page |> 
+  html_element(xpath='//*[@id="selection_rankings_nitty_gritty_data_table"]') |>
+  html_table()
+
+df <- team_table |> 
+  select(Team, Conference) |> 
+  bind_cols(teamurls) |> 
+  rename(URL = 3) |> 
+  mutate(Team = gsub("(AQ)", "", Team, fixed = TRUE))
+```
+Now we're ready to get our data. The first thing we're going to scrape is the rosters. The rosters have some data that the team stats don't that's worth getting, so we are going to fire off ~350 requests to stats.ncaa.org to get those using the url fragments from our rankings page scrape and some purr functions. 
+
+Things to note here: I am not this good at R functions. Claude is. I added a bunch of things here to make sure some important columns are getting cleaned up as I expect them because of some past calamities. 
+
+```{r}
+get_roster <- function(row, root_url) {
+  roster_url <- paste0(root_url, row$URL, "/roster")
+  
+  tryCatch({
+    roster_page <- read_html(roster_url)
+    
+    roster_table <- roster_page |> 
+      html_elements("table") |> 
+      html_table() |>
+      pluck(1) |>
+      mutate(
+        Team = gsub("(AQ)", "", row$Team, fixed = TRUE),
+        Conference = row$Conference
+      )
+    
+    return(roster_table)
+  }, 
+  error = function(e) {
+    warning(paste("Error fetching roster for team:", row$Team))
+    return(NULL)
+  })
+}
+
+get_all_rosters <- function(df, root_url) {
+  # Create progress bar
+  pb <- progress_bar$new(
+    format = "  downloading [:bar] :percent eta: :eta",
+    total = nrow(df)
+  )
+  
+  # Add progress update to the function
+  get_roster_with_progress <- function(row, root_url) {
+    result <- get_roster(row, root_url)
+    pb$tick()
+    return(result)
+  }
+  
+  # Add rate limiting
+  slowly_get_roster <- slowly(
+    get_roster_with_progress,
+    rate = rate_delay(3)
+  )
+  
+  # Run the function
+  df |>
+    pmap_dfr(
+      ~slowly_get_roster(tibble(...), root_url),
+      .progress = FALSE  # Turn off purrr's progress since we're using our own
+    )
+}
+
+# Usage:
+rosters <- get_all_rosters(df, root_url)
+
+rosters <- rosters |> 
+  mutate(Season = season) |> 
+  mutate(Team = gsub("()", "", Team, fixed = TRUE))
+
+rosters <- rosters |> 
+  mutate(Team = gsub("()", "", Team, fixed = TRUE))
+```
+
+Next, the team stats. This is really done in two steps -- first the fetching, then the cleaning and separating. Because the team data and the player data appears in the same table, it makes no sense to do this twice, so first we get the data and then we create the products we want out of it. 
+
+This too fill fire off ~350 requests to stats.ncaa.org, so once again, we *slowly* get this data. 
+
+```{r}
+get_team_stats <- function(team_name, conference, url) {
+  # Construct full URL
+  player_stats_url <- paste0(root_url, url, "/season_to_date_stats")
+  
+  # Get and process the page
+  player_stats_page <- player_stats_url |> 
+    read_html()
+  
+  # Get stats table
+  stats_table <- player_stats_page |> 
+    html_elements("table") |> 
+    html_table() |> 
+    pluck(1) 
+  
+  stats_table <- stats_table |> 
+    mutate(across(everything(), as.character)) |> 
+    mutate(
+      Team = team_name,
+      Conference = conference
+    ) 
+    
+  return(stats_table)
+}
+
+# Add sleep between iterations
+slowly_get_stats <- slowly(get_team_stats, rate = rate_delay(3))
+
+team_stats <- pmap_dfr(
+  list(
+    team_name = df$Team,
+    conference = df$Conference,
+    url = df$URL
+  ),
+  slowly_get_stats,
+  .progress = TRUE
+) |> 
+  relocate(Team, Conference)
+```
+
+Now we make some data tables from our fetched data. First, team and opponent stats -- offense and defense, really. Then, individual player stats. 
+
+```{r}
+team_totals <- team_stats |> filter(Player == "Totals") |> 
+  mutate(Season = season) |> 
+  select(Season, Team, Conference, 11:26) |> 
+  mutate_at(vars(4:19), ~as.numeric(gsub(",", "", .)))
+
+opponent_totals <- team_stats |> filter(Player == "Opponent Totals") |> 
+  mutate(Season = season) |> 
+  select(Season, Team, Conference, 11:26) |> 
+  mutate_at(vars(4:19), ~as.numeric(gsub(",", "", .))) |> 
+  rename_with(~paste0("Opponent_", .), 4:19) 
+
+total_stats <- team_totals |> inner_join(opponent_totals) |> clean_names()
+
+player_stats <- team_stats |> 
+  filter(Player != "Opponent Totals") |> 
+  filter(Player != "Totals") |> 
+  filter(Player != "TEAM") |> 
+  rename(Name = Player) |> 
+  mutate(Season = season) |> 
+  select(Season, everything()) |> 
+  mutate(`#` = as.numeric(`#`)) |>  
+  mutate_at(vars(9:27), ~as.numeric(gsub(",", "", .))) |> 
+  select(1:27) |> 
+  mutate(Team = gsub("()", "", Team, fixed = TRUE))
+```
+
+Last but very much not least: Write these out as csvs. You do not want to be running this every time you need volleyball data. The NCAA doesn't update these numbers in real time -- it's some hours after a match is played -- and the rankings don't update but once a week. How often you need to scrape this is up to you, but make sure you're using csvs in your analysis and not the results of the scraper. 
+
+```{r}
+write_csv(players, playerfilename)
+
+write_csv(total_stats, teamfilename)
+```
